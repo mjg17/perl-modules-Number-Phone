@@ -1,0 +1,283 @@
+#!/usr/local/bin/perl
+
+# THIS SCRIPT IS NOT INTENDED FOR END USERS OR FOR PEOPLE INSTALLING
+# THE MODULES, BUT FOR THE AUTHOR'S USE WHEN UPDATING THE DATA FROM OFCOM'S
+# PUBLISHED DATA.
+
+use strict;
+use warnings;
+use Data::Dumper; local $Data::Dumper::Sortkeys = 1; # local $Data::Dumper::Indent = 0;
+
+use lib 'lib';
+
+$| = 1;
+
+my %extra_idd_codes = (
+    # libphonenumber doesn't cover TF French Southern Territories due to lack of info.
+    # https://en.wikipedia.org/wiki/List_of_country_calling_codes#At_a_glance reckons it's 262
+    # along with Réunion and Mayotte, so we'll put it there. (Previously 596 with MQ.)
+    262 => 'TF',
+
+    # http://en.wikipedia.org/wiki/Telephone_numbers_in_the_United_Kingdom#Crown_dependencies
+    # - checked 2015-09-18 MJG
+    441481 => 'GG', 447781 => 'GG', 447839 => 'GG', 447911 => 'GG',
+    441534 => 'JE', 447509 => 'JE', 447797 => 'JE', 447937 => 'JE', 447700 => 'JE', 447829 => 'JE',
+    441624 => 'IM', 447624 => 'IM', 447524 => 'IM', 447924 => 'IM',
+
+    # GS apparently shares (according to wikipedia) +500 with FK, but it's
+    # unknown whether it actually has any phone service at all or whether
+    # the handful of people there just use sat-phones
+    500     => 'GS',            # (FK will be added from libphonenumber)
+
+    # https://en.wikipedia.org/wiki/Global_Mobile_Satellite_System - checked 2015-09-18 MJG
+    # https://en.wikipedia.org/wiki/International_Networks_%28country_code%29
+    800     => 'InternationalFreephone',
+    808     => 'SharedCostServices',
+    870     => 'Inmarsat',      # 'SNAC' service
+    871     => 'Inmarsat',      # discontinued 2008?
+    872     => 'Inmarsat',      # discontinued 2008?
+    873     => 'Inmarsat',      # discontinued 2008?
+    874     => 'Inmarsat',      # discontinued 2008?
+    878     => 'UniversalPersonalTelecoms',
+    881     => 'GMSS',       # \ Sat-phones
+    8810    => 'ICO',        # |
+    8811    => 'ICO',        # |
+    8812    => 'Ellipso',    # |
+    8813    => 'Ellipso',    # |
+    # 8814 is spare          # |
+    # 8815 is spare          # |
+    8816    => 'Iridium',    # |
+    8817    => 'Iridium',    # |
+    8818    => 'Globalstar', # |
+    8819    => 'Globalstar', # /
+    882     => 'InternationalNetworks',
+    883     => 'InternationalNetworks',
+    883120  => 'Telenor',
+    883130  => 'Mobistar',
+    883140  => 'MTTGlobalNetworks',
+    8835100 => 'VOXBON',
+    888     => 'TelecomsForDisasterRelief',
+    # 979 is used for testing when we fail to load a module when we
+    # know what "country" it is
+    979     => 'InternationalPremiumRate',
+    991     => 'ITPCS',
+    # 999 deliberately NYI for testing; proposed to be like 888.
+    );
+
+my %prefix_overrides = (
+    'BO' => { international_prefix => '00' },
+    'BR' => { international_prefix => '00' }, # actual 00xx where xx is carrier code
+
+    # Chile mandates a variable carrier code before the international prefix, but according to:
+    # http://www.thephonebook.bt.com/publisha.content/en/search/international/record.publisha?id=L47
+    # 00 should work.
+    'CL' => { international_prefix => '00' },
+
+    # these hard-code one of the available carriers:
+    'CO' => { international_prefix => '009', national_prefix => '09' },
+
+    'AX' => { international_prefix => '00' },
+    'FI' => { international_prefix => '00' },
+    'HK' => { international_prefix => '001' },
+
+    # this hard-codes one of the available carriers:
+    'ID' => { international_prefix => '001' },
+
+    'IL' => { international_prefix => '00' },
+
+    # this hard-codes one of the available carriers:
+    'KH' => { international_prefix => '001' },
+
+    'KP' => { international_prefix => '00' }, # '99' also possible
+
+    # this hard-codes one of the available carriers:
+    'KR' => { international_prefix => '001' },
+
+    'LI' => { national_prefix => undef },
+
+    # libphonenumber uses '020' as preferred, but says:
+    #   Preferred international prefix is expected to standardize on just '00'
+    'MU' => { international_prefix => '00' },
+
+    # sources seem to disagree with practice, for now we disagree with libphonenumber's comment.
+    'MW' => { national_prefix => undef },
+
+    'MX' => { international_prefix => '00' }, # 09 for person-to-person
+
+    # Peru appears to require a variable carrier code before the international prefix, but according to:
+    # http://www.thephonebook.bt.com/publisha.content/en/search/international/record.publisha?id=L175
+    # 00 should work.
+    'PE' => { international_prefix => '00' },
+
+    # this hard-codes one of the two available carriers (other is '012'):
+    'PW' => { international_prefix => '011' },
+
+    # not possible to definitively establish international prefix.
+    # could be '00', '002', or '00' + XYZ, but BT thinks 002.
+    # http://www.thephonebook.bt.com/publisha.content/en/search/international/record.publisha?id=L174
+    'PY' => { international_prefix => '002' },
+
+    'SB' => { international_prefix => '00' }, # 01 also possible
+
+    # Various 0XY international carrier codes are available, but according to
+    # https://en.wikipedia.org/wiki/Telephone_numbers_in_Singapore#International_Direct_Dialling_and_VoIP_services
+    #  "The generic international call prefix when making an international call is 000,
+    #   which all telecommunications service providers are required to share."
+    'SG' => { international_prefix => '000' },
+
+    # not clear if Somalia uses a trunk prefix or not, so...
+    'SO' => { national_prefix => undef },
+
+    'TH' => { international_prefix => '001' }, # references disagree with libphonenumber
+
+    # this probably hard-codes one of the available carriers:
+    'TW' => { international_prefix => '002' },
+
+    'TZ' => { international_prefix => '000' }, # libphonenumber pattern includes Kenya & Uganda shortcodes
+    'UG' => { international_prefix => '000' }, # libphonenumber pattern includes Tanzania & Uganda shortcodes
+
+    # Not clear if the Vatican country code is actually in use, meanwhile, to match previous Country::Data:
+    'VA' => { country_code => '379', international_prefix => '00', national_prefix => undef },
+    );
+
+use XML::XPath;
+my $xml = XML::XPath->new(filename => 'libphonenumber/resources/PhoneNumberMetadata.xml');
+my @territories = $xml->find('/phoneNumberMetadata/territories/territory')->get_nodelist();
+
+my $data_path = 'lib/Number/Phone/Country/DataNew.pm';
+open(my $data_fh, '>', $data_path) || die("Can't write '$data_path': $!\n");
+
+my %idd_codes = %extra_idd_codes;
+my %prefix_codes;
+
+TERRITORY: foreach my $territory (@territories) {
+  my $IDD_country_code = ''.$territory->find('@countryCode');
+  my $ISO_country_code = ''.$territory->find('@id');
+
+  if ($IDD_country_code != 1 and $ISO_country_code ne '001') {
+    my @idd_country_codes = ($IDD_country_code);
+    my $leading_digits = ''.$territory->find('@leadingDigits');
+    if ($leading_digits) {
+        @idd_country_codes = expand_country_code($IDD_country_code, $leading_digits);
+    }
+    add_single_or_list(\%idd_codes, $ISO_country_code, @idd_country_codes);
+    # @idd_codes{@idd_country_codes} = ( $ISO_country_code ) x @idd_country_codes;
+  }
+
+  if ($ISO_country_code =~ /^..$/) {
+
+    my $international_prefix = ''.$territory->find('@internationalPrefix');
+    my $national_prefix      = ''.$territory->find('@nationalPrefix');
+
+    if (my $overrides = $prefix_overrides{$ISO_country_code}) {
+        $IDD_country_code     = $overrides->{country_code}         if exists $overrides->{country_code};
+        $international_prefix = $overrides->{international_prefix} if exists $overrides->{international_prefix};
+        $national_prefix      = $overrides->{national_prefix}      if exists $overrides->{national_prefix};
+    }
+
+    unless (defined $international_prefix and $international_prefix =~ /^\d+$/) {
+      my $pref_ip = ''.$territory->find('@preferredInternationalPrefix');
+      if ($pref_ip =~ /^\d+$/) {
+        $international_prefix = $pref_ip;
+        warn("'$ISO_country_code': using preferred international prefix '$pref_ip'\n");
+      } else {
+        $international_prefix = '';
+        warn("'$ISO_country_code': bad international prefix '$international_prefix'\n");
+      }
+    }
+
+    $international_prefix = undef if defined $international_prefix and $international_prefix eq '';
+    $national_prefix      = undef if defined $national_prefix      and $national_prefix      eq '';
+
+    $prefix_codes{$ISO_country_code} = [ $IDD_country_code, $international_prefix, $national_prefix ];
+  }
+  $prefix_codes{UK} = $prefix_codes{GB};
+}
+
+my $existing_module = 'lib/Number/Phone/Country/Data.pm';
+if ( -r $existing_module ) {
+    require $existing_module;
+    require Set::Scalar;
+
+    my $new_idd = Set::Scalar->new(keys %idd_codes);
+    my $old_idd = Set::Scalar->new(keys %Number::Phone::Country::idd_codes);
+    if (my $only_new_idd = $new_idd->difference($old_idd)) {
+        warn "Only in new IDD codes: $only_new_idd\n";
+    }
+    if (my $only_old_idd = $old_idd->difference($new_idd)) {
+        warn "Only in old IDD codes: $only_old_idd\n";
+    }
+    foreach my $key (sort $old_idd->intersection($new_idd)->members) {
+        my $n = $idd_codes{$key};
+        my $o = $Number::Phone::Country::idd_codes{$key};
+        next if $n eq $o;
+        if (ref $n and ref $o) {
+            my $n_set = Set::Scalar->new(@$n);
+            my $o_set = Set::Scalar->new(@$o);
+            next if $n_set->is_equal($o_set);
+        }
+        warn "Differences for IDD code '$key'\n";
+    }
+
+    my $new_prefix = Set::Scalar->new(keys %prefix_codes);
+    my $old_prefix = Set::Scalar->new(keys %Number::Phone::Country::prefix_codes);
+    if (my $only_new_prefix = $new_prefix->difference($old_prefix)) {
+        warn "Only in new prefix codes: $only_new_prefix\n";
+    }
+    if (my $only_old_prefix = $old_prefix->difference($new_prefix)) {
+        warn "Only in old prefix codes: $only_old_prefix\n";
+    }
+    foreach my $key (sort $old_prefix->intersection($new_prefix)->members) {
+        my $n = $prefix_codes{$key};
+        my $o = $Number::Phone::Country::prefix_codes{$key};
+        my $diff;
+        for my $i ( 0..2 ) {
+            my $ni = $n->[$i];
+            my $oi = $o->[$i];
+            next if not defined $ni and not defined $oi;
+            next if defined $ni and defined $oi and $ni eq $oi;
+            $diff++;
+        }
+        next unless $diff;
+        warn "Differences for prefix code '$key'\n";
+    }
+}
+
+print $data_fh Data::Dumper->new([\%idd_codes], [qw(idd_codes)])->Dump;
+print $data_fh "\n";
+
+print $data_fh Data::Dumper->new([\%prefix_codes], [qw(prefix_codes)])->Dump;
+print $data_fh "\n";
+
+close $data_fh || die("Can't close '$data_path': $!\n");
+
+sub add_single_or_list {
+    my ($hash_ref, $value, @keys) = @_;
+    foreach my $key ( @keys ) {
+        my @existing;
+        if (exists $hash_ref->{$key}) {
+            my $hash_val = $hash_ref->{$key};
+            @existing = ref $hash_val ? ( @$hash_val ) : ( $hash_val );
+        }
+        push @existing, $value;
+        $hash_ref->{$key} = scalar(@existing) > 1 ? \@existing : $existing[0];
+    }
+    return;
+}
+
+# Copes with a limited pattern of top-level alternation,
+# and embedded digit classes (which must be lists rather than ranges)
+#
+sub expand_country_code {
+    my ($country_code, $leading_digits) = @_;
+    my @codes;
+    my @alts = split('\|', $leading_digits);
+    foreach my $alt (@alts) {
+        if (my ($pre, $list, $post) = ($alt =~ /^(\d*)\[(\d+)\](\d*)$/)) {
+            push @codes, map { $country_code . $pre . $_ . $post } split('', $list);
+        } else {
+            push @codes, $country_code . $alt;
+        }
+    }
+    return @codes;
+}
